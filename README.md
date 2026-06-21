@@ -1,2 +1,2 @@
 # VerdictIQ
-Smart analysis, Confident predictions
+The intelligence behind every prediction.
