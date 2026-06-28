@@ -1,13 +1,35 @@
+# data_collector.py
+import os
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-BASE_URL = "https://www.thesportsdb.com/api/v1/json/123"
+load_dotenv()
 
-# Simple in-memory cache so repeated predictions for the same team
-# don't re-hit the API every time during testing/dev.
+BASE_URL = "https://v3.football.api-sports.io"
+API_KEY = os.environ.get("API_FOOTBALL_KEY")
+
+HEADERS = {
+    "x-apisports-key": API_KEY,
+}
+
+# API-Football's "season" parameter wants a starting year, e.g. 2025 for
+# the 2025/26 season. We default to the current year and let the season
+# logic below handle the year-boundary case for leagues that start mid-year.
+CURRENT_YEAR = datetime.now().year
+
 _team_id_cache = {}
 _form_cache = {}
 _h2h_cache = {}
+
+
+def _check_api_errors(data, context=""):
+    errors = data.get("errors")
+    if errors:
+        print(f"[data_collector] API error{f' ({context})' if context else ''}: {errors}")
+        return True
+    return False
+
 
 def get_team_id(team_name):
     key = team_name.lower().strip()
@@ -15,45 +37,88 @@ def get_team_id(team_name):
     if key in _team_id_cache:
         return _team_id_cache[key]
 
-    url = f"{BASE_URL}/searchteams.php?t={team_name}"
+    if not API_KEY:
+        print("[data_collector] No API_FOOTBALL_KEY set. Check your .env file.")
+        return None
+
+    url = f"{BASE_URL}/teams"
+    params = {"search": team_name}
 
     try:
-        response = requests.get(url, timeout=5)
+        response = requests.get(url, headers=HEADERS, params=params, timeout=5)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"[data_collector] Error fetching team ID for '{team_name}': {e}")
         return None
 
     data = response.json()
-    teams = data.get("teams")
 
-    if not teams:
+    if _check_api_errors(data, context=f"searching '{team_name}'"):
+        return None
+
+    results = data.get("response") or []
+
+    if not results:
         print(f"[data_collector] No team found for '{team_name}'")
         return None
 
     exact_match = next(
-        (t for t in teams if t["strTeam"].lower() == key),
+        (r for r in results if r["team"]["name"].lower() == key),
         None
     )
-    chosen = exact_match or teams[0]
+    chosen = exact_match or results[0]
 
-    if not exact_match and len(teams) > 1:
+    if not exact_match and len(results) > 1:
         print(
             f"[data_collector] Ambiguous match for '{team_name}', "
-            f"defaulting to '{chosen['strTeam']}'. "
-            f"Other matches: {[t['strTeam'] for t in teams]}"
+            f"defaulting to '{chosen['team']['name']}'. "
+            f"Other matches: {[r['team']['name'] for r in results]}"
         )
 
     result = {
-        "id": chosen["idTeam"],
-        "official_name": chosen["strTeam"],
+        "id": chosen["team"]["id"],
+        "official_name": chosen["team"]["name"],
     }
     _team_id_cache[key] = result
     return result
 
-def get_recent_form(team_name, num_matches=5):
+
+def _parse_fixture_date(fixture):
+    date_str = fixture.get("fixture", {}).get("date", "")
+    try:
+        return datetime.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _fetch_team_fixtures(team_id, season):
+    """
+    Fetches ALL fixtures for a team in a given season (free tier doesn't
+    support the 'last' parameter, so we pull everything and filter/sort
+    ourselves).
+    """
+    url = f"{BASE_URL}/fixtures"
+    params = {"team": team_id, "season": season}
+
+    try:
+        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[data_collector] Error fetching fixtures (team={team_id}, season={season}): {e}")
+        return None
+
+    data = response.json()
+
+    if _check_api_errors(data, context=f"fetching fixtures for team {team_id}"):
+        return None
+
+    return data.get("response") or []
+
+
+def get_recent_form(team_name, num_matches=5, season=None):
+    season = season or CURRENT_YEAR
     key = team_name.lower().strip()
-    cache_key = (key, num_matches)
+    cache_key = (key, num_matches, season)
 
     if cache_key in _form_cache:
         return _form_cache[cache_key]
@@ -64,75 +129,50 @@ def get_recent_form(team_name, num_matches=5):
         return None
 
     team_id = team_info["id"]
-    official_name = team_info["official_name"]  # use this for matching, not raw input
 
-    url = f"{BASE_URL}/eventslast.php?id={team_id}"
+    fixtures = _fetch_team_fixtures(team_id, season)
 
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[data_collector] Error fetching recent form for '{team_name}': {e}")
+    if fixtures is None:
         return None
 
-    data = response.json()
-    events = data.get("results") or []
-
-    if not events:
-        print(f"[data_collector] No recent match data for '{team_name}'")
+    if not fixtures:
+        print(f"[data_collector] No fixtures found for '{team_name}' in season {season}")
         return None
 
-    def match_date(match):
-        date_str = match.get("dateEvent", "")
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d")
-        except (ValueError, TypeError):
-            return datetime.min
+    # Only keep finished matches, then sort most-recent-first
+    finished = [
+        f for f in fixtures
+        if f.get("fixture", {}).get("status", {}).get("short") in ("FT", "AET", "PEN")
+    ]
+    finished.sort(key=_parse_fixture_date, reverse=True)
 
-    events = sorted(events, key=match_date, reverse=True)
+    recent = finished[:num_matches]
 
     wins = 0
     draws = 0
     losses = 0
     matches_counted = 0
 
-    for match in events:
-        home = match.get("strHomeTeam")
-        away = match.get("strAwayTeam")
-        home_score_raw = match.get("intHomeScore")
-        away_score_raw = match.get("intAwayScore")
+    for match in recent:
+        home_team = match.get("teams", {}).get("home", {})
+        away_team = match.get("teams", {}).get("away", {})
 
-        if home_score_raw is None or away_score_raw is None:
-            continue
+        is_home = home_team.get("id") == team_id
+        team_side = home_team if is_home else away_team
 
-        try:
-            home_score = int(home_score_raw)
-            away_score = int(away_score_raw)
-        except (TypeError, ValueError):
-            continue
+        winner_flag = team_side.get("winner")
 
-        # Compare against the resolved official name, not the raw user input
-        if official_name.lower() == (home or "").lower():
-            team_score, opponent_score = home_score, away_score
-        elif official_name.lower() == (away or "").lower():
-            team_score, opponent_score = away_score, home_score
-        else:
-            continue
-
-        if team_score > opponent_score:
+        if winner_flag is True:
             wins += 1
-        elif team_score < opponent_score:
+        elif winner_flag is False:
             losses += 1
         else:
             draws += 1
 
         matches_counted += 1
 
-        if matches_counted >= num_matches:
-            break
-
     if matches_counted == 0:
-        print(f"[data_collector] No valid completed matches found for '{team_name}'")
+        print(f"[data_collector] No completed matches found for '{team_name}' in season {season}")
         return None
 
     result = {
@@ -144,171 +184,82 @@ def get_recent_form(team_name, num_matches=5):
 
     _form_cache[cache_key] = result
     return result
-    key = team_name.lower().strip()
 
-    if key in _form_cache:
-        return _form_cache[key]
 
-    team_id = get_team_id(team_name)
-
-    if not team_id:
-        return None
-
-    url = f"{BASE_URL}/eventslast.php?id={team_id}"
-
-    try:
-        response = requests.get(url, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[data_collector] Error fetching recent form for '{team_name}': {e}")
-        return None
-
-    data = response.json()
-    events = data.get("results") or []
-
-    if not events:
-        print(f"[data_collector] No recent match data for '{team_name}'")
-        return None
-
-    # Don't trust the API's default ordering — sort explicitly by date,
-    # most recent first.
-    def match_date(match):
-        date_str = match.get("dateEvent", "")
-        try:
-            return datetime.strptime(date_str, "%Y-%m-%d")
-        except (ValueError, TypeError):
-            return datetime.min
-
-    events = sorted(events, key=match_date, reverse=True)
-
-    wins = 0
-    draws = 0
-    losses = 0
-    matches_counted = 0
-
-    for match in events:
-        home = match.get("strHomeTeam")
-        away = match.get("strAwayTeam")
-        home_score_raw = match.get("intHomeScore")
-        away_score_raw = match.get("intAwayScore")
-
-        # Skip matches with missing/unplayed scores (e.g. postponed, future fixtures)
-        if home_score_raw is None or away_score_raw is None:
-            continue
-
-        try:
-            home_score = int(home_score_raw)
-            away_score = int(away_score_raw)
-        except (TypeError, ValueError):
-            continue
-
-        if team_name.lower() == (home or "").lower():
-            team_score, opponent_score = home_score, away_score
-        elif team_name.lower() == (away or "").lower():
-            team_score, opponent_score = away_score, home_score
-        else:
-            # Shouldn't normally happen, but guard against mismatched data
-            continue
-
-        if team_score > opponent_score:
-            wins += 1
-        elif team_score < opponent_score:
-            losses += 1
-        else:
-            draws += 1
-
-        matches_counted += 1
-
-        if matches_counted >= num_matches:
-            break
-
-    if matches_counted == 0:
-        print(f"[data_collector] No valid completed matches found for '{team_name}'")
-        return None
-
-    result = {
-        "wins": wins,
-        "draws": draws,
-        "losses": losses,
-        "matches_counted": matches_counted,
-    }
-
-    _form_cache[key] = result
-    return result
-
-def get_head_to_head(team1, team2):
-    """
-    Searches for past meetings between two teams using TheSportsDB's
-    searchevents.php endpoint. Tries both name orderings since we don't
-    know which team was historically 'home'.
-
-    NOTE: On the free tier, this endpoint is limited to 1 result per
-    request, so results will often be sparse — sometimes just one
-    match, sometimes none at all. This is an API limitation, not a bug.
-    """
-    cache_key = tuple(sorted([team1.lower().strip(), team2.lower().strip()]))
+def get_head_to_head(team1, team2, num_matches=5):
+    cache_key = tuple(sorted([team1.lower().strip(), team2.lower().strip()])) + (num_matches,)
 
     if cache_key in _h2h_cache:
         return _h2h_cache[cache_key]
 
-    def search_event_name(name_combo):
-        url = f"{BASE_URL}/searchevents.php?e={name_combo}"
-        try:
-            response = requests.get(url, timeout=5)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            print(f"[data_collector] Error searching '{name_combo}': {e}")
-            return []
+    team1_info = get_team_id(team1)
+    team2_info = get_team_id(team2)
 
-        data = response.json()
-        return data.get("event") or []
+    empty_result = {
+        "team1_wins": 0,
+        "team2_wins": 0,
+        "draws": 0,
+        "matches_counted": 0,
+    }
 
-    combo_a = f"{team1.replace(' ', '_')}_vs_{team2.replace(' ', '_')}"
-    combo_b = f"{team2.replace(' ', '_')}_vs_{team1.replace(' ', '_')}"
+    if not team1_info or not team2_info:
+        _h2h_cache[cache_key] = empty_result
+        return empty_result
 
-    events = search_event_name(combo_a) + search_event_name(combo_b)
+    team1_id = team1_info["id"]
+    team2_id = team2_info["id"]
 
-    if not events:
+    url = f"{BASE_URL}/fixtures/headtohead"
+    params = {"h2h": f"{team1_id}-{team2_id}"}
+
+    try:
+        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        print(f"[data_collector] Error fetching head-to-head for '{team1}' vs '{team2}': {e}")
+        return None
+
+    data = response.json()
+
+    if _check_api_errors(data, context=f"fetching H2H for '{team1}' vs '{team2}'"):
+        return None
+
+    fixtures = data.get("response") or []
+
+    finished = [
+        f for f in fixtures
+        if f.get("fixture", {}).get("status", {}).get("short") in ("FT", "AET", "PEN")
+    ]
+    finished.sort(key=_parse_fixture_date, reverse=True)
+
+    recent = finished[:num_matches]
+
+    if not recent:
         print(f"[data_collector] No head-to-head history found for '{team1}' vs '{team2}'")
-        result = {
-            "team1_wins": 0,
-            "team2_wins": 0,
-            "draws": 0,
-            "matches_counted": 0,
-        }
-        _h2h_cache[cache_key] = result
-        return result
+        _h2h_cache[cache_key] = empty_result
+        return empty_result
 
     team1_wins = 0
     team2_wins = 0
     draws = 0
     matches_counted = 0
 
-    for match in events:
-        home = match.get("strHomeTeam")
-        away = match.get("strAwayTeam")
-        home_score_raw = match.get("intHomeScore")
-        away_score_raw = match.get("intAwayScore")
+    for match in recent:
+        home_team = match.get("teams", {}).get("home", {})
+        away_team = match.get("teams", {}).get("away", {})
 
-        if home_score_raw is None or away_score_raw is None:
-            continue
-
-        try:
-            home_score = int(home_score_raw)
-            away_score = int(away_score_raw)
-        except (TypeError, ValueError):
-            continue
-
-        if team1.lower() == (home or "").lower():
-            t1_score, t2_score = home_score, away_score
-        elif team1.lower() == (away or "").lower():
-            t1_score, t2_score = away_score, home_score
+        if home_team.get("id") == team1_id:
+            team1_side = home_team
+        elif away_team.get("id") == team1_id:
+            team1_side = away_team
         else:
             continue
 
-        if t1_score > t2_score:
+        winner_flag = team1_side.get("winner")
+
+        if winner_flag is True:
             team1_wins += 1
-        elif t2_score > t1_score:
+        elif winner_flag is False:
             team2_wins += 1
         else:
             draws += 1
