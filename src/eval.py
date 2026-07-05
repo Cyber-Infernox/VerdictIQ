@@ -1,4 +1,3 @@
-# eval.py
 from agent import predict_with_agent
 
 test_pairs = [

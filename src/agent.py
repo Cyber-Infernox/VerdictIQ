@@ -1,4 +1,3 @@
-# agent.py
 from smolagents import LiteLLMModel, CodeAgent
 from tools import fetch_recent_form, fetch_head_to_head
 
@@ -13,31 +12,30 @@ agent = CodeAgent(
     model=model,
 )
 
-
 def predict_with_agent(team1: str, team2: str) -> str:
-    """
-    Runs the agent to predict the outcome of a match between two teams,
-    using whatever data tools it has access to. Returns the agent's
-    final answer as a string (winner, confidence, and reasoning).
-    """
     task = (
         f"Predict the winner of an upcoming match between '{team1}' and '{team2}'.\n\n"
         f"Steps:\n"
         f"1. Call fetch_recent_form for both teams.\n"
         f"2. Call fetch_head_to_head for the pair.\n"
-        f"3. Look closely at 'matches_counted' in both results. This tells you how "
-        f"much data you actually have. If matches_counted is 1 or 2, that is a VERY "
-        f"small sample — do not describe it as 'strong' or 'excellent' form. Say "
-        f"explicitly that the sample size is small and your confidence should be "
-        f"moderate (e.g. 50-60%) rather than high, regardless of the result.\n"
-        f"4. Only express high confidence (70%+) if matches_counted is 4 or 5 for "
-        f"both teams AND the data clearly favors one side.\n\n"
+        f"3. If either team returns an 'error' key in the result, you MUST stop "
+        f"and call final_answer immediately saying you cannot predict this match "
+        f"because data is unavailable. Do NOT invent or assume any statistics.\n"
+        f"4. Evaluate the data using this confidence scale:\n"
+        f"   - 5 matches is a GOOD sample size — treat it as reliable.\n"
+        f"   - 1 or 2 matches is a small sample — express lower confidence.\n"
+        f"   - If both form AND head-to-head clearly favor one team → 70-80% confidence.\n"
+        f"   - If only one signal favors one team → 55-65% confidence.\n"
+        f"   - If signals conflict or are very close → 50% confidence.\n"
+        f"   - Do NOT automatically cap confidence at 50% just because you have 5 matches.\n"
+        f"     5 matches is enough to make a reasoned prediction.\n\n"
         f"When you are ready to finish, call final_answer with ONE single string "
         f"argument containing your full answer — do not pass separate keyword "
         f"arguments like winner= or confidence=. Format that single string exactly "
         f"like this:\n"
-        f"Winner: <team name or 'Too close to call'>\n"
-        f"Confidence: <percentage>\n"
-        f"Reasoning: <2-3 sentences, explicitly mentioning data sample size>"
+        f"Winner: <team name or 'Too close to call' or 'Unable to predict'>\n"
+        f"Confidence: <percentage or 'N/A' if unable to predict>\n"
+        f"Reasoning: <2-3 sentences explaining which signals drove the prediction "
+        f"and how confident you are given the data>"
     )
     return agent.run(task)

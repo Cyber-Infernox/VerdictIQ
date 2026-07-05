@@ -1,179 +1,93 @@
-# data_collector.py
+import sqlite3
 import os
-import requests
-from datetime import datetime, timezone
-from dotenv import load_dotenv
 
-load_dotenv()
+DB_PATH = os.environ.get("DATABASE_URL", "verdictiq.db")
 
-BASE_URL = "https://v3.football.api-sports.io"
-API_KEY = os.environ.get("API_FOOTBALL_KEY")
-
-HEADERS = {
-    "x-apisports-key": API_KEY,
-}
-
-# API-Football's "season" parameter wants a starting year, e.g. 2025 for
-# the 2025/26 season. We default to the current year and let the season
-# logic below handle the year-boundary case for leagues that start mid-year.
-CURRENT_YEAR = datetime.now().year
-
-_team_id_cache = {}
 _form_cache = {}
 _h2h_cache = {}
 
+TEAM_ALIASES = {
+    "manchester united": "man united",
+    "manchester city": "man city",
+    "paris saint-germain": "paris sg",
+    "paris saint germain": "paris sg",
+    "psg": "paris sg",
+    "atletico madrid": "atletico madrid",
+    "inter milan": "inter",
+    "ac milan": "milan",
+    "tottenham": "tottenham",
+    "tottenham hotspur": "tottenham",
+    "newcastle": "newcastle",
+    "newcastle united": "newcastle",
+    "wolverhampton": "wolves",
+    "wolverhampton wanderers": "wolves",
+    "west ham": "west ham",
+    "west ham united": "west ham",
+    "brighton": "brighton",
+    "brighton & hove albion": "brighton",
+    "nottingham forest": "nott'm forest",
+    "sheffield united": "sheffield united",
+    "aston villa": "aston villa",
+    "bayer leverkusen": "leverkusen",
+    "rb leipzig": "leipzig",
+    "borussia dortmund": "dortmund",
+    "borussia monchengladbach": "m'gladbach",
+}
 
-def _check_api_errors(data, context=""):
-    errors = data.get("errors")
-    if errors:
-        print(f"[data_collector] API error{f' ({context})' if context else ''}: {errors}")
-        return True
-    return False
-
-
-def get_team_id(team_name):
-    key = team_name.lower().strip()
-
-    if key in _team_id_cache:
-        return _team_id_cache[key]
-
-    if not API_KEY:
-        print("[data_collector] No API_FOOTBALL_KEY set. Check your .env file.")
-        return None
-
-    url = f"{BASE_URL}/teams"
-    params = {"search": team_name}
-
-    try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=5)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[data_collector] Error fetching team ID for '{team_name}': {e}")
-        return None
-
-    data = response.json()
-
-    if _check_api_errors(data, context=f"searching '{team_name}'"):
-        return None
-
-    results = data.get("response") or []
-
-    if not results:
-        print(f"[data_collector] No team found for '{team_name}'")
-        return None
-
-    exact_match = next(
-        (r for r in results if r["team"]["name"].lower() == key),
-        None
-    )
-    chosen = exact_match or results[0]
-
-    if not exact_match and len(results) > 1:
-        print(
-            f"[data_collector] Ambiguous match for '{team_name}', "
-            f"defaulting to '{chosen['team']['name']}'. "
-            f"Other matches: {[r['team']['name'] for r in results]}"
-        )
-
-    result = {
-        "id": chosen["team"]["id"],
-        "official_name": chosen["team"]["name"],
-    }
-    _team_id_cache[key] = result
-    return result
-
-
-def _parse_fixture_date(fixture):
-    date_str = fixture.get("fixture", {}).get("date", "")
-    try:
-        return datetime.fromisoformat(date_str)
-    except (ValueError, TypeError):
-        return datetime.min.replace(tzinfo=timezone.utc)
-
-
-def _fetch_team_fixtures(team_id, season):
+def _resolve_name(team_name):
     """
-    Fetches ALL fixtures for a team in a given season (free tier doesn't
-    support the 'last' parameter, so we pull everything and filter/sort
-    ourselves).
+    Resolves a user-typed team name to the name stored in the database.
+    Falls back to the original name if no alias is found.
     """
-    url = f"{BASE_URL}/fixtures"
-    params = {"team": team_id, "season": season}
-
-    try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[data_collector] Error fetching fixtures (team={team_id}, season={season}): {e}")
-        return None
-
-    data = response.json()
-
-    if _check_api_errors(data, context=f"fetching fixtures for team {team_id}"):
-        return None
-
-    return data.get("response") or []
-
-
-def get_recent_form(team_name, num_matches=5, season=None):
-    season = season or CURRENT_YEAR
     key = team_name.lower().strip()
-    cache_key = (key, num_matches, season)
+    return TEAM_ALIASES.get(key, key)
+
+def _get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def get_recent_form(team_name, num_matches=5):
+    resolved = _resolve_name(team_name)
+    cache_key = (resolved, num_matches)
 
     if cache_key in _form_cache:
         return _form_cache[cache_key]
 
-    team_info = get_team_id(team_name)
+    conn = _get_conn()
 
-    if not team_info:
+    rows = conn.execute("""
+        SELECT date, home_team, away_team, home_score, away_score
+        FROM matches
+        WHERE home_team = ? OR away_team = ?
+        ORDER BY date DESC
+        LIMIT ?
+    """, (resolved, resolved, num_matches)).fetchall()
+
+    conn.close()
+
+    if not rows:
+        print(f"[data_collector] No matches found for '{team_name}' (resolved: '{resolved}')")
         return None
-
-    team_id = team_info["id"]
-
-    fixtures = _fetch_team_fixtures(team_id, season)
-
-    if fixtures is None:
-        return None
-
-    if not fixtures:
-        print(f"[data_collector] No fixtures found for '{team_name}' in season {season}")
-        return None
-
-    # Only keep finished matches, then sort most-recent-first
-    finished = [
-        f for f in fixtures
-        if f.get("fixture", {}).get("status", {}).get("short") in ("FT", "AET", "PEN")
-    ]
-    finished.sort(key=_parse_fixture_date, reverse=True)
-
-    recent = finished[:num_matches]
 
     wins = 0
     draws = 0
     losses = 0
     matches_counted = 0
 
-    for match in recent:
-        home_team = match.get("teams", {}).get("home", {})
-        away_team = match.get("teams", {}).get("away", {})
+    for row in rows:
+        is_home = row["home_team"] == resolved
+        team_score = row["home_score"] if is_home else row["away_score"]
+        opp_score = row["away_score"] if is_home else row["home_score"]
 
-        is_home = home_team.get("id") == team_id
-        team_side = home_team if is_home else away_team
-
-        winner_flag = team_side.get("winner")
-
-        if winner_flag is True:
+        if team_score > opp_score:
             wins += 1
-        elif winner_flag is False:
+        elif team_score < opp_score:
             losses += 1
         else:
             draws += 1
 
         matches_counted += 1
-
-    if matches_counted == 0:
-        print(f"[data_collector] No completed matches found for '{team_name}' in season {season}")
-        return None
 
     result = {
         "wins": wins,
@@ -185,15 +99,13 @@ def get_recent_form(team_name, num_matches=5, season=None):
     _form_cache[cache_key] = result
     return result
 
-
 def get_head_to_head(team1, team2, num_matches=5):
-    cache_key = tuple(sorted([team1.lower().strip(), team2.lower().strip()])) + (num_matches,)
+    resolved1 = _resolve_name(team1)
+    resolved2 = _resolve_name(team2)
+    cache_key = tuple(sorted([resolved1, resolved2])) + (num_matches,)
 
     if cache_key in _h2h_cache:
         return _h2h_cache[cache_key]
-
-    team1_info = get_team_id(team1)
-    team2_info = get_team_id(team2)
 
     empty_result = {
         "team1_wins": 0,
@@ -202,40 +114,21 @@ def get_head_to_head(team1, team2, num_matches=5):
         "matches_counted": 0,
     }
 
-    if not team1_info or not team2_info:
-        _h2h_cache[cache_key] = empty_result
-        return empty_result
+    conn = _get_conn()
 
-    team1_id = team1_info["id"]
-    team2_id = team2_info["id"]
+    rows = conn.execute("""
+        SELECT home_team, away_team, home_score, away_score
+        FROM matches
+        WHERE (home_team = ? AND away_team = ?)
+           OR (home_team = ? AND away_team = ?)
+        ORDER BY date DESC
+        LIMIT ?
+    """, (resolved1, resolved2, resolved2, resolved1, num_matches)).fetchall()
 
-    url = f"{BASE_URL}/fixtures/headtohead"
-    params = {"h2h": f"{team1_id}-{team2_id}"}
+    conn.close()
 
-    try:
-        response = requests.get(url, headers=HEADERS, params=params, timeout=10)
-        response.raise_for_status()
-    except requests.RequestException as e:
-        print(f"[data_collector] Error fetching head-to-head for '{team1}' vs '{team2}': {e}")
-        return None
-
-    data = response.json()
-
-    if _check_api_errors(data, context=f"fetching H2H for '{team1}' vs '{team2}'"):
-        return None
-
-    fixtures = data.get("response") or []
-
-    finished = [
-        f for f in fixtures
-        if f.get("fixture", {}).get("status", {}).get("short") in ("FT", "AET", "PEN")
-    ]
-    finished.sort(key=_parse_fixture_date, reverse=True)
-
-    recent = finished[:num_matches]
-
-    if not recent:
-        print(f"[data_collector] No head-to-head history found for '{team1}' vs '{team2}'")
+    if not rows:
+        print(f"[data_collector] No H2H history for '{team1}' vs '{team2}'")
         _h2h_cache[cache_key] = empty_result
         return empty_result
 
@@ -244,22 +137,14 @@ def get_head_to_head(team1, team2, num_matches=5):
     draws = 0
     matches_counted = 0
 
-    for match in recent:
-        home_team = match.get("teams", {}).get("home", {})
-        away_team = match.get("teams", {}).get("away", {})
+    for row in rows:
+        is_team1_home = row["home_team"] == resolved1
+        t1_score = row["home_score"] if is_team1_home else row["away_score"]
+        t2_score = row["away_score"] if is_team1_home else row["home_score"]
 
-        if home_team.get("id") == team1_id:
-            team1_side = home_team
-        elif away_team.get("id") == team1_id:
-            team1_side = away_team
-        else:
-            continue
-
-        winner_flag = team1_side.get("winner")
-
-        if winner_flag is True:
+        if t1_score > t2_score:
             team1_wins += 1
-        elif winner_flag is False:
+        elif t2_score > t1_score:
             team2_wins += 1
         else:
             draws += 1

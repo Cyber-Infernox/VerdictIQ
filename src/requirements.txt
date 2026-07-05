@@ -4,3 +4,4 @@ uvicorn
 pydantic
 smolagents[litellm]
 python-dotenv
+pandas

@@ -1,23 +1,29 @@
-# tools.py
 from smolagents import tool
 from data_collector import get_recent_form, get_head_to_head
-
 
 @tool
 def fetch_recent_form(team_name: str) -> dict:
     """
     Fetches a team's recent match form (wins, draws, losses) based on
-    their last 5 completed matches.
+    their last 5 completed matches from the database.
 
     Args:
         team_name: The name of the team to look up.
 
     Returns:
         A dictionary with keys: wins, draws, losses, matches_counted.
-        Returns None if the team can't be found or has no recent match data.
+        If the team is not found in the database, returns a dictionary
+        with an 'error' key explaining the team was not found — do NOT
+        invent or assume form data in this case.
     """
-    return get_recent_form(team_name)
-
+    result = get_recent_form(team_name)
+    if result is None:
+        return {
+            "error": f"No data found for '{team_name}' in the database. "
+                     f"This team may be a club team — the current database "
+                     f"only contains international (national team) matches."
+        }
+    return result
 
 @tool
 def fetch_head_to_head(team1: str, team2: str) -> dict:
@@ -30,8 +36,7 @@ def fetch_head_to_head(team1: str, team2: str) -> dict:
 
     Returns:
         A dictionary with keys: team1_wins, team2_wins, draws, matches_counted.
-        matches_counted will often be 0 or very low — this data source has
-        limited historical coverage, so treat low counts as 'not much
-        reliable signal here' rather than as evidence of an even matchup.
+        If no history is found, matches_counted will be 0 — do NOT invent
+        or assume head-to-head data.
     """
     return get_head_to_head(team1, team2)

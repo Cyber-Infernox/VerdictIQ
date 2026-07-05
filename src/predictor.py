@@ -1,9 +1,7 @@
 from data_collector import get_recent_form, get_head_to_head
 
-# Weight given to recent form vs head-to-head when H2H data is available.
 FORM_WEIGHT = 0.65
 H2H_WEIGHT = 0.35
-
 
 def calculate_form_score(form):
     """
@@ -17,10 +15,9 @@ def calculate_form_score(form):
         return 0
 
     raw_score = form["wins"] * 3 + form["draws"]
-    max_possible = matches * 3  # if team won every counted match
+    max_possible = matches * 3
 
     return raw_score / max_possible
-
 
 def calculate_h2h_scores(h2h):
     """
@@ -40,7 +37,6 @@ def calculate_h2h_scores(h2h):
     team2_raw = h2h["team2_wins"] * 3 + h2h["draws"]
 
     return team1_raw / max_possible, team2_raw / max_possible
-
 
 def predict(team1, team2):
 
@@ -93,13 +89,11 @@ def predict(team1, team2):
     print("\n========== CALCULATING FINAL SCORES ==========")
 
     if h2h_score1 is not None:
-        # Combine form + head-to-head using weighted average
         final_score1 = (FORM_WEIGHT * form_score1) + (H2H_WEIGHT * h2h_score1)
         final_score2 = (FORM_WEIGHT * form_score2) + (H2H_WEIGHT * h2h_score2)
         print(f"{team1}: Form={round(form_score1, 3)}  H2H={round(h2h_score1, 3)}  Final={round(final_score1, 3)}")
         print(f"{team2}: Form={round(form_score2, 3)}  H2H={round(h2h_score2, 3)}  Final={round(final_score2, 3)}")
     else:
-        # No head-to-head data — fall back to form only
         final_score1 = form_score1
         final_score2 = form_score2
         print(f"{team1}: Form={round(form_score1, 3)} (H2H unavailable)  Final={round(final_score1, 3)}")
@@ -108,7 +102,6 @@ def predict(team1, team2):
     total = final_score1 + final_score2
 
     if total == 0:
-        # Both teams have no positive signal at all — genuinely no edge
         winner = "Draw"
         confidence = 50
     elif final_score1 > final_score2:

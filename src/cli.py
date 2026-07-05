@@ -1,4 +1,3 @@
-# cli.py
 from agent import predict_with_agent
 
 team1 = input("Team 1: ").strip()
