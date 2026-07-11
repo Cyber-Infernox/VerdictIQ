@@ -1,4 +1,5 @@
 from smolagents import tool
+from predictor import predict
 from data_collector import get_recent_form, get_head_to_head
 
 @tool
@@ -40,3 +41,20 @@ def fetch_head_to_head(team1: str, team2: str) -> dict:
         or assume head-to-head data.
     """
     return get_head_to_head(team1, team2)
+
+@tool
+def predict_match(team1: str, team2: str) -> dict:
+    """
+    Predicts the winner between two teams using recent form,
+    head-to-head history, and a deterministic scoring engine.
+
+    Args:
+        team1: Name of the first team participating in the match.
+        team2: Name of the second team participating in the match.
+
+    Returns:
+        A dictionary containing the predicted winner, confidence percentage,
+        team statistics, form scores, final scores, head-to-head data,
+        and prediction weights.
+    """
+    return predict(team1, team2, verbose=True)

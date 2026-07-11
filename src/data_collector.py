@@ -1,7 +1,6 @@
 import sqlite3
-import os
 
-DB_PATH = os.environ.get("DATABASE_URL", "verdictiq.db")
+DB_PATH = "verdictiq.db"
 
 _form_cache = {}
 _h2h_cache = {}
