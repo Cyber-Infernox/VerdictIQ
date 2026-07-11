@@ -1,9 +1,14 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from typing import Optional, Dict, Any
+
 from agent import predict_with_agent
 
-app = FastAPI(title="VerdictIQ API", version="1.0.0")
+app = FastAPI(
+    title="VerdictIQ API",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,45 +22,24 @@ class PredictRequest(BaseModel):
     team2: str
 
 class PredictResponse(BaseModel):
-    team1: str
-    team2: str
     winner: str
-    confidence: str
-    reasoning: str
+    confidence: int
 
-def parse_agent_response(raw: str, team1: str, team2: str) -> dict:
-    """
-    Parses the agent's plain-text response into structured fields.
-    Expected format:
-        Winner: Argentina
-        Confidence: 65%
-        Reasoning: Some explanation here.
-    """
-    result = {
-        "team1": team1,
-        "team2": team2,
-        "winner": "Unable to predict",
-        "confidence": "N/A",
-        "reasoning": raw.strip(),
-    }
+    team1: Dict[str, Any]
+    team2: Dict[str, Any]
 
-    for line in raw.strip().splitlines():
-        line = line.strip()
-        if line.lower().startswith("winner:"):
-            result["winner"] = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("confidence:"):
-            result["confidence"] = line.split(":", 1)[1].strip()
-        elif line.lower().startswith("reasoning:"):
-            result["reasoning"] = line.split(":", 1)[1].strip()
-
-    return result
+    head_to_head: Optional[Dict[str, Any]]
+    weights: Dict[str, float]
 
 @app.get("/")
 def health_check():
-    return {"status": "VerdictIQ backend is running"}
+    return {
+        "status": "VerdictIQ backend is running"
+    }
 
 @app.post("/predict", response_model=PredictResponse)
 def predict_match(request: PredictRequest):
+
     team1 = request.team1.strip()
     team2 = request.team2.strip()
 
@@ -72,8 +56,13 @@ def predict_match(request: PredictRequest):
         )
 
     try:
-        raw = predict_with_agent(team1, team2)
-        return parse_agent_response(raw, team1, team2)
+        result = predict_with_agent(
+            team1,
+            team2
+        )
+
+        return result
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
