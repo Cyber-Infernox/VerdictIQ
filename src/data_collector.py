@@ -46,7 +46,7 @@ def _get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
-def get_recent_form(team_name, num_matches=5):
+def get_recent_form(team_name, num_matches=10):
     resolved = _resolve_name(team_name)
     cache_key = (resolved, num_matches)
 
